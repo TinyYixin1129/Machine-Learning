@@ -1,0 +1,302 @@
+---
+title: "TP12 construction"
+author: "Hou Longhao Shen Siyi"
+date: "2024-01-01"
+output:   
+  word_document: default
+  pdf_document: default
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 3. Construction
+
+```{r}
+setwd("E:/codes/r/tp12_3")
+
+library(corrplot)
+library(kernlab)
+library(MASS)
+library(glmnet)
+library(leaps)
+library(pROC)
+library(class)
+library(rpart)
+library(rpart.plot)
+library(randomForest)
+library(caret)
+library(e1071)
+library(nnet)
+set.seed(123)
+construction=read.table("construction_train.txt")
+construction.cor=cor(construction)
+corrplot(construction.cor)
+```
+## 3.1. Analyse exploratoire
+
+Le dataset contient 103 prédicteurs (X1, X2, ..., X103), et une colonne y. Le fichier contient 250 observations. Les prédicteurs sont fortement corrélés donc il est nécessaire de réaliser une ACP.On sélectionne les composantes principales qui conservent 99,9 % de la variance, et il ne reste que 43.
+
+```{r}
+pca_con=prcomp(construction[,1:103],scale=TRUE)
+cumulative_variance <- cumsum(pca_con$sdev^2) / sum(pca_con$sdev^2)
+num_components <- which(cumulative_variance >= 0.999)[1]
+nn=num_components
+data_pca <- as.data.frame(pca_con$x[, 1:num_components])
+data_pca$y=construction$y
+```
+
+## 3.2. Recherche du modèle
+
+Pour trouver un meilleur modèle, on fait des régression sur les sous ensembles de prédicteur sélectionné par la méthode pas à pas exhaistive.
+
+```{r}
+reg.fit <-regsubsets(y ~ .,data=data_pca,method="exhaustive",nvmax=nn)
+reg.subsets <- summary(reg.fit)
+plot(reg.fit,scale="r2", main ="")
+title(main = "Stepwise selection" )
+```
+
+On calcule la MSE de la régression linéaire, la régression ridge et la régression lasso.
+On fait la cross-validation en 5 parties, calcule l'erreur de test en prennant chacun de ces sous ensembles comme ensemble de test et les autres comme ensemble d'apprentissage, et on calcule la MSE. On répète 10 fois et calcule la moyenne. Puis on obtient les courbes.
+
+```{r}
+n.reg = dim(data_pca)[1]
+p.reg = dim(data_pca)[2]
+
+reg.models.list <- c("lm", "ridge", "lasso") # Liste des modeles
+reg.subset.error <- c()
+reg.models.error <- matrix(0,nrow = nn-2,ncol = 3)
+colnames(reg.models.error) <- reg.models.list
+rownames(reg.models.error) <- c(2:(nn-1))
+
+reg.error.model <- function(model, reg.n_folds, reg.trials, which.subsets)
+{
+  for (subset in which.subsets)
+  {
+    reg.subset.error[subset] <- 0
+    for(i in c(1:reg.trials)) # On fait plusieurs essais
+    {
+      reg.folds <- sample(rep(1:reg.n_folds, length.out=n.reg))
+      for(k in 1:reg.n_folds) # Sur chaque segment de la cross-validation
+      {
+        reg.train <- data_pca[reg.folds!=k,]
+        reg.train.X <- reg.train[,-p.reg]
+        reg.train.y <- reg.train$y
+        reg.test <- data_pca[reg.folds==k,]
+        reg.test.X <- reg.test[,-p.reg]
+        reg.test.y <- reg.test$y
+        
+        reg.subset <- reg.train.X[,reg.subsets$which[subset,2:(nn+1)]]
+        reg.subset.test <- reg.test.X[,reg.subsets$which[subset,2:(nn+1)]]
+        
+        # Apprentissage du modele
+        reg.model <- NULL
+        if(model == "lm")
+        {
+          reg.model <- lm(reg.train.y ~., data = reg.subset)
+        }
+        else
+        {
+          if(model == "ridge")
+          {
+            cv.out<-cv.glmnet(as.matrix(reg.subset),reg.train.y,alpha=0)
+            reg.model<-glmnet(as.matrix(reg.subset),reg.train.y,lambda=cv.out$lambda.min,alpha=0)
+          }
+          
+          else if(model == "lasso")
+          {
+            cv.out<-cv.glmnet(as.matrix(reg.subset),reg.train.y,alpha=1)
+            reg.model<-glmnet(as.matrix(reg.subset),reg.train.y,lambda=cv.out$lambda.min,alpha=1)
+          }
+          else
+          {
+            reg.model <- NULL
+          }
+        }
+        
+        if(!is.null(reg.model))
+        {
+          if(model == "lm")
+          {
+            reg.predict <- predict(reg.model, newdata = reg.subset.test)
+            reg.subset.error[subset] <- reg.subset.error[subset] + mean((reg.test.y - reg.predict)^2)
+          }
+          else
+          {
+            reg.predict <- predict(reg.model,s=cv.out$lambda.min,newx=as.matrix(reg.subset.test))
+            reg.subset.error[subset] <- reg.subset.error[subset] + mean((reg.test.y - reg.predict)^2)
+          }
+        }
+      }
+    }
+    reg.subset.error[subset] <- reg.subset.error[subset]/(reg.n_folds*reg.trials)
+  }
+  reg.subset.error
+}
+
+
+for (model in reg.models.list){
+  reg.models.error[,model] <- as.vector(reg.error.model(model, 5,10, c(2:(nn-1)))[2:(nn-1)])
+}
+
+
+```
+
+```{r}
+plot(reg.models.error[,"lm"], col = "red", type = "l", xlab = "nombre de prédicteurs", ylab = "espérance de l'erreur quadratique")
+lines(reg.models.error[,"ridge"], col = "blue", type = "l")
+lines(reg.models.error[,"lasso"], col = "green", type = "l")
+legend("topright",legend = c("linéaire", "ridge", "lasso"), col = c("red","blue","green"), lty = 1:1)
+```
+On observe que la MSE en fonction du nombre de prédicteurs diminue jusqu'à atteindre un minimum pour un nombre de prédicteurs compris dans l'intervalle [40,60].
+
+On répète donc en se limitant aux sous ensembles de 40 à 60 prédicteur avec une répétition 30 fois.
+```{r}
+reg.subset.error <- c()
+reg.models.error.zoom <- matrix(0,nrow = 21,ncol = 3)
+colnames(reg.models.error.zoom) <- reg.models.list
+rownames(reg.models.error.zoom) <- c(20:40)
+
+for (model in reg.models.list)
+{
+  reg.models.error.zoom[,model] <- as.vector(reg.error.model(model, 5,30, c(20:40))[20:40])
+}
+```
+
+```{r}
+plot(x=c(20:40),y=reg.models.error.zoom[,"lm"], col = "red", type = "b", xlab = "nombre de prédicteurs", ylab = "espérance de l'erreur quadratique")
+lines(x=c(20:40),y=reg.models.error.zoom[,"ridge"], col = "blue", type = "b")
+lines(x=c(20:40),y=reg.models.error.zoom[,"lasso"], col = "green", type = "b")
+legend("topright",legend = c("linéaire", "ridge", "lasso"), col = c("red","blue","green"), lty = 1:1)
+```
+
+```{r}
+a=which.min(reg.models.error.zoom[,1])
+b=which.min(reg.models.error.zoom[,2])
+c=which.min(reg.models.error.zoom[,3])
+print(c(a,b,c))
+```
+La MSE la plus faible est obtenue pour 28 prédicteur avec la régression linéaire, 27 prédicteur avec la régression ridge et 30 prédicteur avec la régression lasso. On teste encore sur ces trois modèle.
+```{r}
+reg.trials <- 50
+reg.n_folds <- 5
+reg.models.subsets <- c("lm28", "ridge27","lasso30")
+models.subsets.error <- matrix(0,nrow = 3, ncol = 1)
+rownames(models.subsets.error) <- reg.models.subsets
+colnames(models.subsets.error) <- c("espérance")
+
+for(model in reg.models.subsets){ 
+  for(i in c(1:reg.trials))
+  {
+    reg.folds <- sample(rep(1:reg.n_folds, length.out=n.reg))
+    for(k in 1:reg.n_folds)
+    {
+      reg.train <- data_pca[reg.folds!=k,]
+      reg.train.X <- reg.train[,-p.reg]
+      reg.train.y <- reg.train$y
+      reg.test <- data_pca[reg.folds==k,]
+      reg.test.X <- reg.test[,-p.reg]
+      reg.test.y <- reg.test$y
+      
+      reg.X.28 <- reg.train.X[,reg.subsets$which[28, 2:(nn+1)]]
+      reg.test.28 <- reg.test.X[,reg.subsets$which[28, 2:(nn+1)]]
+      
+      reg.X.27 <- reg.train.X[,reg.subsets$which[27, 2:(nn+1)]]
+      reg.test.27 <- reg.test.X[,reg.subsets$which[27, 2:(nn+1)]]
+      
+      reg.X.30 <- reg.train.X[,reg.subsets$which[30, 2:(nn+1)]]
+      reg.test.30 <- reg.test.X[,reg.subsets$which[30, 2:(nn+1)]]
+      
+      # Apprentissage du modele
+      if(model == "lm28")
+      {
+        reg.model <- lm(reg.train.y~.,data=reg.X.28)
+      }
+      else if(model == "ridge27")
+      {
+        cv.out<-cv.glmnet(as.matrix(reg.X.27),reg.train.y,alpha=0)
+        reg.model<-glmnet(as.matrix(reg.X.27),reg.train.y,lambda=cv.out$lambda.min,alpha=0)
+      }
+      else if(model == "lasso30")
+      {
+        cv.out<-cv.glmnet(as.matrix(reg.X.30),reg.train.y,alpha=1)
+        reg.model<-glmnet(as.matrix(reg.X.30),reg.train.y,lambda=cv.out$lambda.min,alpha=1)
+      }
+      
+      else
+      {
+        reg.model <- NULL
+      }
+      
+      if(!is.null(reg.model))
+      {
+        if(model == "lm28")
+        {
+          reg.predict <- predict(reg.model, newdata = reg.test.28)
+          models.subsets.error[model,1] <- models.subsets.error[model,1] + mean((reg.test.y - reg.predict)^2)
+        }
+        else if (model == "ridge27")
+        {
+          reg.predict <- predict(reg.model,s=cv.out$lambda.min,newx=as.matrix(reg.test.27))
+          models.subsets.error[model,1] <- models.subsets.error[model,1] + mean((reg.test.y - reg.predict)^2)
+        }
+        else if (model == "lasso30")
+        {
+          reg.predict <- predict(reg.model,s=cv.out$lambda.min,newx=as.matrix(reg.test.30))
+          models.subsets.error[model,1] <- models.subsets.error[model,1] + mean((reg.test.y - reg.predict)^2)
+        }
+      }
+    }
+  }
+  models.subsets.error[model,1] <- models.subsets.error[model,1]/(reg.n_folds*reg.trials)
+}
+```
+
+
+```{r}
+models.subsets.error
+```
+On remarque que la plus faible MSE est encore la régression linéaire sur sous ensembles des 28 prédicteurs. On le choisi pour le tester sur maggle.
+
+```{r}
+#datax=data_pca[,-(nn+1)]
+#datax=datax[,reg.subsets$which[32, 2:(nn+1)]]
+#datay=data_pca$y
+#cv.out<-cv.glmnet(as.matrix(datax),datay,alpha=1)
+#construction.fit=glmnet(as.matrix(datax),datay,lambda=cv.out$lambda.min,alpha=1)
+#summary(construction.fit)
+#print(construction.fit$beta)
+```
+
+
+```{r}
+#prediction_construction=function(dataset){
+#  library(leaps)
+#  library(glmnet)
+#  data_test_pca <- predict(pca, newdata = dataset[, 1:103])
+#  data_test_pca <- as.data.frame(data_test_pca[, 1:43])
+#  data=data_test_pca[,reg.subsets$which[32, 2:44]]
+#  
+#  predict(construction.fit,s=cv.out$lambda.min,newx=as.matrix(data))
+#}
+
+#save("construction.fit","cv.out","reg.subsets","pca","prediction_construction",file#="construction_env.Rdata")
+```
+
+```{r}
+data_fit=data_pca[,reg.subsets$which[28, 2:(nn+1)]]
+construction.fit=lm(y~.,data=data_fit)
+```
+
+```{r,eval=FALSE, include=FALSE}
+prediction_construction=function(dataset){
+    library(leaps)
+    data_test_pca <- predict(pca_con, newdata = dataset[, 1:103])
+    data_test_pca <- as.data.frame(data_test_pca[, 1:43])
+    data=data_test_pca[,reg.subsets$which[28, 2:44]]
+    predict(construction.fit,newdata=data)
+}
+save("construction.fit","reg.subsets","pca_con","prediction_construction",file="construction_env.Rdata")
+```
+

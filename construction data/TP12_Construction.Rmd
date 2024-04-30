@@ -1,0 +1,255 @@
+---
+title: "TP12_Construction"
+author: "JingboWANG"
+date: "2023-12-25"
+output:
+  word_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+rm(list=ls())
+setwd("E:/codes/r/tp12_3")
+library(corrplot)
+construction<-read.table("construction_train.txt")
+sum(is.na(construction))
+cor_matrix <- cor(construction[, -ncol(construction)])
+corrplot(cor_matrix, method = "circle")
+```
+
+```{r}
+library(glmnet)
+set.seed(123)
+x_construction <- as.matrix(construction[, -ncol(construction)])
+y_construction <- construction$y
+cv_fit <- cv.glmnet(x_construction, y_construction, alpha = 1) 
+plot(cv_fit)
+
+best_lambda <- cv_fit$lambda.min
+fit <- glmnet(x_construction, y_construction, alpha=1, lambda=best_lambda)
+
+coefficients <- coef(fit, s = best_lambda)
+non_zero_coef_indices <- which(coefficients != 0)-1
+variable_names <- colnames(x_construction)[non_zero_coef_indices]
+new_data <- construction[, c(variable_names, 'y')]
+```
+
+
+
+```{r}
+set.seed(123)
+K <- 10
+n <- nrow(new_data)
+fold <- sample(1:K, n, replace = TRUE)
+MSE_Lasso <- rep(0, K)
+
+x_new <- as.matrix(new_data[, -ncol(new_data)])
+y_new <- new_data$y
+
+for(k in 1:K) {
+  train_indices <- which(fold != k)
+  test_indices <- which(fold == k)
+  
+  cv_fit_fold <- cv.glmnet(x_new[train_indices, ], y_new[train_indices], alpha = 1)
+  best_lambda_fold <- cv_fit_fold$lambda.min
+  
+  fit_fold <- glmnet(x_new[train_indices, ], y_new[train_indices], alpha = 1, lambda = best_lambda_fold)
+  
+  pred <- predict(fit_fold, s=best_lambda_fold, newx = x_new[test_indices, ])
+  
+  MSE_Lasso[k] <- mean((pred - y_new[test_indices])^2)
+}
+
+print(mean(MSE_Lasso))
+```
+
+```{r}
+library(caret)
+library(randomForest)
+
+# 定义一个自定义摘要函数，计算MSE
+control <- trainControl(method="cv", number=10)
+
+# 初始化变量
+bestMSE <- Inf
+bestMtry <- NULL
+tolerance <- 5  # 定义一个阈值，当性能改善小于这个值时停止
+lastMSE <- Inf
+
+for (mtry in 1:25) {  # 你可以根据需要修改范围
+  set.seed(123)
+  rf_model <- train(
+    y ~ ., 
+    data = new_data, 
+    method = "rf",
+    metric = "RMSE",
+    trControl = control,
+    tuneGrid = expand.grid(.mtry = mtry),
+    ntree = 500
+  )
+  
+  # 获取当前迭代的MSE
+  currentMSE <- min(rf_model$results$RMSE)^2  # 将RMSE转换为MSE
+  
+  # 检查性能是否有显著改善
+  if ((lastMSE - currentMSE) < tolerance) {
+    break  # 如果改善不够，停止迭代
+  }
+  
+  # 更新最佳MSE和对应的mtry值
+  if (currentMSE < bestMSE) {
+    bestMSE <- currentMSE
+    bestMtry <- mtry
+  }
+  
+  lastMSE <- currentMSE  # 更新上一次的MSE以供下一次迭代比较
+}
+
+# 输出最佳的mtry和对应的MSE
+cat("Best mtry:", bestMtry, "with MSE:", bestMSE)
+```
+
+```{r}
+set.seed(123)
+K<-10
+n<-nrow(new_data)
+fold<-sample(1:K,n,replace=TRUE)
+MSE_RF<-rep(0,K)
+for(k in (1:K)){
+  rf_model <- randomForest(y ~ ., data = new_data[fold!=k,], ntree = 500, mtry =18 )
+  
+  pred <- predict(rf_model, newdata = new_data[fold==k,])
+  
+  MSE_RF[k]<-mean((pred-new_data[fold==k,]$y)^2)
+}
+
+print(mean(MSE_RF))
+```
+
+
+
+
+
+```{r}
+# SVM  REGRESSION
+library('e1071')
+library('MASS')
+library(kernlab)
+
+# 定义C和epsilon的可能值
+Cs <- c(0.01, 0.1, 1, 10, 100, 1000)
+epsilons <- c(0.001, 0.01, 0.1, 1)
+
+set.seed(123)
+# 初始化变量以存储最佳结果
+bestMSE <- Inf
+bestC <- NA
+bestEpsilon <- NA
+
+# 网格搜索找到最佳的C和epsilon
+for (C in Cs) {
+    for (epsilon in epsilons) {
+        MSE_SVM <- rep(0, K)  # K是你的交叉验证的折数
+        for (k in 1:K) {
+            train_data <- new_data[fold != k, ] 
+            test_data <- new_data[fold == k, ] 
+            svmfit <- ksvm(y ~ ., data = train_data, scaled = TRUE, type = "nu-svr", kernel = "vanilladot", C = C, epsilon = epsilon)
+            pred <- predict(svmfit, newdata = test_data) 
+            MSE_SVM[k] <- mean((pred - test_data$y)^2) 
+        }
+        avgMSE <- mean(MSE_SVM)
+        
+        # 检查是否有更好的MSE
+        if (avgMSE < bestMSE) {
+            bestMSE <- avgMSE
+            bestC <- C
+            bestEpsilon <- epsilon
+        }
+    }
+}
+
+# 输出最佳C、epsilon和对应的MSE
+cat("Best C:", bestC, "Best epsilon:", bestEpsilon, "with MSE:", bestMSE)
+```
+
+
+```{r}
+# SVM  REGRESSION
+library('kernlab')
+library('MASS')
+
+set.seed(123)
+
+MSE_SVM <- rep(0, K) 
+for (k in 1:K) {
+    train_data <- new_data[fold != k, ] 
+    test_data <- new_data[fold == k, ] 
+    svmfit <- ksvm(y ~ ., data = train_data, scaled = TRUE, type = "nu-svr", kernel = "vanilladot", C = 1, epsilon = 0.001)
+    pred <- predict(svmfit, newdata = test_data) 
+    MSE_SVM[k] <- mean((pred - test_data$y)^2) 
+} 
+
+print(mean(MSE_SVM))
+```
+```{r}
+setwd("E:/codes/r/tp12_3")
+
+library(glmnet)
+library('e1071')
+library('MASS')
+library(kernlab)
+#set.seed(1234)
+set.seed(123)
+
+construction<-read.table("construction_train.txt")
+
+x_construction <- as.matrix(construction[, -ncol(construction)])
+y_construction <- construction$y
+cv_fit <- cv.glmnet(x_construction, y_construction, alpha = 1) 
+#plot(cv_fit)
+
+fit <- glmnet(x_construction, y_construction, alpha=1, lambda=cv_fit$lambda.min)
+
+coefficients <- coef(fit, s = cv_fit$lambda.min)
+non_zero_coef_indices <- which(coefficients != 0)-1
+variable_names <- colnames(x_construction)[non_zero_coef_indices]
+new_data <- construction[, c(variable_names, 'y')]
+
+
+K <- 10
+n=nrow(new_data)
+fold <- sample(1:K, n, replace = TRUE)
+
+MSE_SVM <- rep(0, K) 
+for (k in 1:K) {
+    train_data <- new_data[fold != k, ] 
+    test_data <- new_data[fold == k, ] 
+    svmfit <- ksvm(y ~ ., data = train_data, scaled = TRUE, type = "nu-svr", kernel = "vanilladot", C = 1, epsilon = 0.001)
+    pred <- predict(svmfit, newdata = test_data) 
+    MSE_SVM[k] <- mean((pred - test_data$y)^2) 
+} 
+
+print(mean(MSE_SVM))
+```
+```{r}
+
+svmfit <- ksvm(y ~ ., data = new_data, scaled = TRUE, type = "nu-svr", kernel = "vanilladot", C = 1, epsilon = 0.001)
+
+
+#prediction_construction=function(dataset){
+#    library(glmnet)
+#    library('e1071')
+#    library('MASS')
+#    library(kernlab)
+#    dataset <- dataset[, c(variable_names)]
+#    predict(svmfit,newdata=dataset)
+#}
+
+#save("variable_names","svmfit","prediction_construction",file="construction_svm_env_6.Rdata")
+```
+
