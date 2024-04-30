@@ -1,0 +1,123 @@
+---
+title: "R Notebook"
+output:
+  word_document: default
+  html_notebook: default
+  html_document:
+    df_print: paged
+---
+
+```{r, include=FALSE}
+#reticulate::use_python("C:/Users/Liam/AppData/Local/Programs/Python/Python311/python.exe")
+```
+
+```{r,eval=TRUE, echo=TRUE,cache=TRUE}
+setwd("E:/codes/r/tp12")
+train_path <- "./images_train/"
+validation_path <- "./images_validation/"
+```
+
+
+```{r, eeval=TRUE, echo=TRUE,cache=TRUE}
+library(keras)
+#library(reticulate)
+#library(tensorflow)
+set.seed(123)
+```
+
+
+```{r, eval=TRUE, echo=TRUE,cache=TRUE}
+img_width <- 224
+img_height <- 224
+
+model.image <- keras_model_sequential() %>%
+  #layer 1-2
+  layer_conv_2d(filters = 64, kernel_size = c(3, 3), activation = "relu", padding = "same", 
+                input_shape = c(img_width, img_height, 3)) %>%
+  layer_conv_2d(filters = 64, kernel_size = c(3, 3), activation = "relu", padding = "same") %>%
+  layer_max_pooling_2d(pool_size = c(2, 2), strides = c(2, 2)) %>%
+  #layer 3-4
+  layer_conv_2d(filters = 128, kernel_size = c(3, 3), activation = "relu", padding = "same") %>%
+  layer_conv_2d(filters = 128, kernel_size = c(3, 3), activation = "relu", padding = "same") %>%
+  layer_max_pooling_2d(pool_size = c(2, 2), strides = c(2, 2)) %>%
+  #layer 5-7
+  layer_conv_2d(filters = 256, kernel_size = c(3, 3), activation = "relu", padding = "same") %>%
+  layer_conv_2d(filters = 256, kernel_size = c(3, 3), activation = "relu", padding = "same") %>%
+  layer_conv_2d(filters = 256, kernel_size = c(3, 3), activation = "relu", padding = "same") %>%
+  layer_max_pooling_2d(pool_size = c(2, 2), strides = c(2, 2)) %>%
+  #layer 8-10
+  layer_conv_2d(filters = 512, kernel_size = c(3, 3), activation = "relu", padding = "same") %>%
+  layer_conv_2d(filters = 512, kernel_size = c(3, 3), activation = "relu", padding = "same") %>%
+  layer_conv_2d(filters = 512, kernel_size = c(3, 3), activation = "relu", padding = "same") %>%
+  layer_max_pooling_2d(pool_size = c(2, 2), strides = c(2, 2)) %>%
+  #layer 11-13
+  layer_conv_2d(filters = 512, kernel_size = c(3, 3), activation = "relu", padding = "same") %>%
+  layer_conv_2d(filters = 512, kernel_size = c(3, 3), activation = "relu", padding = "same") %>%
+  layer_conv_2d(filters = 512, kernel_size = c(3, 3), activation = "relu", padding = "same") %>%
+  layer_max_pooling_2d(pool_size = c(2, 2), strides = c(2, 2)) %>%
+  #flatten
+  layer_flatten() %>%
+  #layer 14
+  layer_dense(units = 4096, activation = "relu") %>%
+  layer_dropout(rate = 0.5) %>%
+  #layer 15
+  layer_dense(units = 4096, activation = "relu") %>%
+  layer_dropout(rate = 0.5) %>%
+  # layer 16, 3 classes
+  layer_dense(units = 3, activation = "softmax")
+
+summary(model.image)
+
+opt <- optimizer_rmsprop(learning_rate = 1e-4, weight_decay = 1e-6)
+model.image %>% compile(
+  loss = "categorical_crossentropy",
+  optimizer = opt,
+  metrics = "accuracy"
+)
+```
+
+
+```{r, eval=TRUE, echo=TRUE,cache=TRUE}
+datagen <- image_data_generator(
+  rescale = 1/255,
+  rotation_range=40,
+  width_shift_range=0.2,
+  height_shift_range=0.2,
+  shear_range = 0.2,
+  zoom_range = 0.2,
+  horizontal_flip = TRUE,
+  fill_mode='nearest'
+)
+train_data <- flow_images_from_directory(
+  train_path,
+  generator = datagen,
+  target_size = c(img_width, img_height),
+  batch_size = 20,
+  class_mode = "categorical"
+)
+validation_data <- flow_images_from_directory(
+  validation_path,
+  generator = datagen,
+  target_size = c(img_width, img_height),
+  batch_size = 20,
+  class_mode = "categorical"
+)
+```
+```{r, eval=TRUE, echo=TRUE,cache=TRUE}
+history <- model.image %>% fit(
+  train_data,
+  epochs = 100,
+  validation_data = validation_data,
+  shuffle = TRUE,
+  verbose = 2
+)
+```
+```{r, eval=TRUE, echo=TRUE,cache=TRUE}
+plot(history)
+#save("model.image","history","prediction_image",file="image_vgg16_ep100.RData")
+#save_model_tf(object=model.image, filepath="image_vgg16_ep100")
+#loaded_model <- load_model_tf("image_vgg16_ep100")
+model.image %>% save_model_tf("vgg16_ep100.keras")
+model.image.load <- load_model_tf("image_vgg16_ep100.keras")
+```
+
