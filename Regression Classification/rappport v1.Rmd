@@ -1,0 +1,519 @@
+---
+title: 'TP 5  : Régression et classification Sélection de modèles'
+author: "Hou Longhao Melliet Clement"
+date: "2023-11-03"
+output:
+  word_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{r}
+library(MASS)
+library(leaps)
+library(corrplot)
+library(glmnet)
+library(pROC)
+library(class)
+library(rpart)
+library(rpart.plot)
+library(randomForest)
+library(caret)
+library(MASS)
+library(e1071)
+library(nnet)
+```
+
+# 1. Régression
+
+## 1.1. Analyse exploratoire
+
+Le dataset contient 100 prédicteurs (X1, X2, ..., X100), et une colonne y. Le fichier contient 500 observations. Les prédicteurs sont peu corrélés donc il n'est pas nécessaire de réaliser une ACP
+
+```{r}
+reg.data <- read.table("TP5_a23_reg_app.txt")
+reg.cor <- cor(reg.data)
+count_above_0.8 <- sum(reg.cor > 0.8)-100
+count_above_0.3 <- sum(reg.cor > 0.3)-100
+print(c(count_above_0.8, count_above_0.3))
+```
+## 1.2. Recherche du modèle
+
+On commence par la régression linéaire pour repérer les prédicteurs les plus significatifs.
+
+```{r}
+reg <- lm(y ~., data = reg.data)
+summary(reg)
+```
+Il y a 42 prédicteurs avec une p-value < 0.001 et 4 autres < 0.05.
+
+Pour trouver un meilleur modèle, on fait des régression sur les sous ensembles de prédicteur sélectionné par la méthode pas à pas forward (la méthode exhaistive prend trop de temps).
+
+```{r}
+set.seed(123)
+reg.fit <-regsubsets(y ~ .,data=reg.data,method="exhaustive",nvmax=100,really.big = T)
+reg.subsets <- summary(reg.fit)
+plot(reg.fit,scale="r2", main ="")
+title(main = "Forward stepwise selection" )
+```
+On calcule la MSE de la régression linéaire, la régression ridge et la régression lasso.
+On fait la cross-validation en 5 parties, calcule l'erreur de test en prennant chacun de ces sous ensembles comme ensemble de test et les autres comme ensemble d'apprentissage, et on calcule la MSE. On répète 10 fois et calcule la moyenne. Puis on obtient les courbes.
+
+```{r}
+n.reg = dim(reg.data)[1]
+p.reg = dim(reg.data)[2]
+
+reg.models.list <- c("lm", "ridge", "lasso") # Liste des modeles
+reg.subset.error <- c()
+reg.models.error <- matrix(0,nrow = 98,ncol = 3)
+colnames(reg.models.error) <- reg.models.list
+rownames(reg.models.error) <- c(2:99)
+
+reg.error.model <- function(model, reg.n_folds, reg.trials, which.subsets)
+{
+  for (subset in which.subsets)
+  {
+    reg.subset.error[subset] <- 0
+    for(i in c(1:reg.trials)) # On fait plusieurs essais
+    {
+      reg.folds <- sample(rep(1:reg.n_folds, length.out=n.reg))
+      for(k in 1:reg.n_folds) # Sur chaque segment de la cross-validation
+      {
+        reg.train <- reg.data[reg.folds!=k,]
+        reg.train.X <- reg.train[,-p.reg]
+        reg.train.y <- reg.train$y
+        reg.test <- reg.data[reg.folds==k,]
+        reg.test.X <- reg.test[,-p.reg]
+        reg.test.y <- reg.test$y
+        
+        reg.subset <- reg.train.X[,reg.subsets$which[subset,2:101]]
+        reg.subset.test <- reg.test.X[,reg.subsets$which[subset,2:101]]
+        
+        # Apprentissage du modele
+        reg.model <- NULL
+        if(model == "lm")
+        {
+          reg.model <- lm(reg.train.y ~., data = reg.subset)
+        }
+        else
+        {
+          if(model == "ridge")
+          {
+            cv.out<-cv.glmnet(as.matrix(reg.subset),reg.train.y,alpha=0)
+            reg.model<-glmnet(as.matrix(reg.subset),reg.train.y,lambda=cv.out$lambda.min,alpha=0)
+          }
+          
+          else if(model == "lasso")
+          {
+            cv.out<-cv.glmnet(as.matrix(reg.subset),reg.train.y,alpha=1)
+            reg.model<-glmnet(as.matrix(reg.subset),reg.train.y,lambda=cv.out$lambda.min,alpha=1)
+          }
+          else
+          {
+            reg.model <- NULL
+          }
+        }
+        
+        if(!is.null(reg.model))
+        {
+          if(model == "lm")
+          {
+            reg.predict <- predict(reg.model, newdata = reg.subset.test)
+            reg.subset.error[subset] <- reg.subset.error[subset] + mean((reg.test.y - reg.predict)^2)
+          }
+          else
+          {
+            reg.predict <- predict(reg.model,s=cv.out$lambda.min,newx=as.matrix(reg.subset.test))
+            reg.subset.error[subset] <- reg.subset.error[subset] + mean((reg.test.y - reg.predict)^2)
+          }
+        }
+      }
+    }
+    reg.subset.error[subset] <- reg.subset.error[subset]/(reg.n_folds*reg.trials)
+  }
+  reg.subset.error
+}
+
+
+for (model in reg.models.list){
+  reg.models.error[,model] <- as.vector(reg.error.model(model, 5,10, c(2:99))[2:99])
+}
+```
+
+```{r}
+plot(reg.models.error[,"lm"], col = "red", type = "l", xlab = "nombre de prédicteurs", ylab = "espérance de l'erreur quadratique")
+lines(reg.models.error[,"ridge"], col = "blue", type = "l")
+lines(reg.models.error[,"lasso"], col = "green", type = "l")
+legend("topright",legend = c("linéaire", "ridge", "lasso"), col = c("red","blue","green"), lty = 1:1)
+
+```
+On observe que la MSE en fonction du nombre de prédicteurs diminue jusqu'à atteindre un minimum pour un nombre de prédicteurs compris dans l'intervalle [40,60].
+
+On répète donc en se limitant aux sous ensembles de 40 à 60 prédicteur avec une répétition 100 fois.
+
+```{r}
+reg.subset.error <- c()
+reg.models.error.zoom <- matrix(0,nrow = 21,ncol = 3)
+colnames(reg.models.error.zoom) <- reg.models.list
+rownames(reg.models.error.zoom) <- c(40:60)
+
+for (model in reg.models.list)
+{
+  reg.models.error.zoom[,model] <- as.vector(reg.error.model(model, 5,100, c(40:60))[40:60])
+}
+```
+
+```{r}
+plot(x=c(40:60),y=reg.models.error.zoom[,"lm"], col = "red", type = "b", xlab = "nombre de prédicteurs", ylab = "espérance de l'erreur quadratique")
+lines(x=c(40:60),y=reg.models.error.zoom[,"ridge"], col = "blue", type = "b")
+lines(x=c(40:60),y=reg.models.error.zoom[,"lasso"], col = "green", type = "b")
+legend("topright",legend = c("linéaire", "ridge", "lasso"), col = c("red","blue","green"), lty = 1:1)
+
+```
+On peut voir que la performance de régression ridge n'est pas très bon.
+
+```{r}
+a=which.min(reg.models.error.zoom[,1])
+b=which.min(reg.models.error.zoom[,3])
+print(c(a,b))
+```
+La MSE la plus faible est obtenue pour 51 prédicteur avec la régression linéaire. Mais malgré 100 fois de répétitions, le résultat varie encore. On décide donc d'ajouter d'autres modèles, par la sélction pas à pas avec critère AIC et BIC.
+
+```{r}
+plot(reg.fit,scale="adjr2", main = "") 
+title(main = "AIC")
+plot(reg.fit,scale="bic", main = "")
+title(main = "BIC")
+```
+On peut donc réaliser les régressions linéaire et lasso sur les meilleurs sous-ensembles donnés par les sélections AIC et BIC, la régression linéaire sur sous ensembles des 51 prédicteurs et la régression lasso sur sous ensembles des 50 prédicteurs. On ajoute le nombre de répétitions. 
+
+```{r}
+reg.trials <- 200
+reg.n_folds <- 5
+reg.models.subsets <- c("lm51", "lasso50","lmAIC", "lassoAIC", "lmBIC", "lassoBIC")
+models.subsets.error <- matrix(0,nrow = 6, ncol = 1)
+rownames(models.subsets.error) <- reg.models.subsets
+colnames(models.subsets.error) <- c("espérance")
+
+for(model in reg.models.subsets){ 
+  for(i in c(1:reg.trials))
+  {
+    reg.folds <- sample(rep(1:reg.n_folds, length.out=n.reg))
+    for(k in 1:reg.n_folds)
+    {
+      reg.train <- reg.data[reg.folds!=k,]
+      reg.train.X <- reg.train[,-p.reg]
+      reg.train.y <- reg.train$y
+      reg.test <- reg.data[reg.folds==k,]
+      reg.test.X <- reg.test[,-p.reg]
+      reg.test.y <- reg.test$y
+      
+      reg.X.51 <- reg.train.X[,reg.subsets$which[51, 2:101]]
+      reg.test.51 <- reg.test.X[,reg.subsets$which[51, 2:101]]
+      reg.X.50 <- reg.train.X[,reg.subsets$which[50, 2:101]]
+      reg.test.50 <- reg.test.X[,reg.subsets$which[50, 2:101]]
+      
+      # Apprentissage du modele
+      if(model == "lm51")
+      {
+        reg.model <- lm(reg.train.y~.,data=reg.X.51)
+      }
+      else if(model == "lasso50")
+      {
+        cv.out<-cv.glmnet(as.matrix(reg.X.50),reg.train.y,alpha=1)
+        reg.model<-glmnet(as.matrix(reg.X.50),reg.train.y,lambda=cv.out$lambda.min,alpha=1)
+      }
+      else if(model == "lmAIC")
+      {
+        reg.model <- lm(y ~ X4+X6+X8+X10+X12+X13+X14+X15+X16+X18+X20+X21+X22+X23+X23+X25+X26+X27+X30+X31+X32+X34+X35+X37+X39+X41+X42+X43+X46+X47+X49+X50+X51+X52+X53+X55+X56+X57+X58+X59+X65+X66+X67+X68+X70+X71+X72+X73+X74+X76+X79+X80+X82+X83+X84+X86+X87+X90+X91+X92+X93+X94+X97+X98+X100, data = reg.train)
+      }
+      else if(model == "lassoAIC")
+      {
+        x=model.matrix(y~X4+X6+X8+X10+X12+X13+X14+X15+X16+X18+X20+X21+X22+X23+X23+X25+X26+X27+X30+X31+X32+X34+X35+X37+X39+X41+X42+X43+X46+X47+X49+X50+X51+X52+X53+X55+X56+X57+X58+X59+X65+X66+X67+X68+X70+X71+X72+X73+X74+X76+X79+X80+X82+X83+X84+X86+X87+X90+X91+X92+X93+X94+X97+X98+X100,reg.data)
+        xapp <- x[reg.folds!=k,]
+        xtst <- x[reg.folds == k,]
+        cv.out<-cv.glmnet(xapp,reg.train.y,alpha=1)
+        reg.model<-glmnet(xapp,reg.train.y,lambda=cv.out$lambda.min,alpha=1)
+      }
+      else if(model == "lmBIC")
+      {
+        reg.model <- lm(y ~ X4+X6+X8+X10+X12+X13+X14+X16+X18+X20+X21+X22+X24+X26+X30+X31+X35+X37+X43+X46+X47+X49+X50+X51+X52+X53+X55+X56+X57+X58+X59+X65+X66+X67+X70+X71+X74+X80+X82+X84+X92+X93+X94+X100 , data = reg.train)
+      }
+      else if(model == "lassoBIC")
+      {
+        x <- model.matrix(y ~ X4+X6+X8+X10+X12+X13+X14+X16+X18+X20+X21+X22+X24+X26+X30+X31+X35+X37+X43+X46+X47+X49+X50+X51+X52+X53+X55+X56+X57+X58+X59+X65+X66+X67+X70+X71+X74+X80+X82+X84+X92+X93+X94+X100, reg.data)
+        xapp <- x[reg.folds!=k,]
+        xtst <- x[reg.folds == k,]
+        
+        cv.out<-cv.glmnet(xapp,reg.train.y,alpha=1)
+        
+        reg.model<-glmnet(xapp,reg.train.y,lambda=cv.out$lambda.min,alpha=1)
+        
+      }
+      else
+      {
+        reg.model <- NULL
+      }
+      
+      if(!is.null(reg.model))
+      {
+        if(model == "lm51" || model == "lmAIC" || model == "lmBIC")
+        {
+          reg.predict <- predict(reg.model, newdata = reg.test)
+          models.subsets.error[model,1] <- models.subsets.error[model,1] + mean((reg.test.y - reg.predict)^2)
+        }
+        else if (model == "lassoAIC" || model == "lassoBIC")
+        {
+          reg.predict <- predict(reg.model,s=cv.out$lambda.min,newx=xtst)
+          models.subsets.error[model,1] <- models.subsets.error[model,1] + mean((reg.test.y - reg.predict)^2)
+        }
+        else if (model == "lasso50")
+        {
+          reg.predict <- predict(reg.model,s=cv.out$lambda.min,newx=as.matrix(reg.test.50))
+          models.subsets.error[model,1] <- models.subsets.error[model,1] + mean((reg.test.y - reg.predict)^2)
+        }
+      }
+    }
+  }
+  models.subsets.error[model,1] <- models.subsets.error[model,1]/(reg.n_folds*reg.trials)
+}
+```
+
+```{r}
+models.subsets.error
+```
+On remarque que la plus faible MSE est encore la régression linéaire sur sous ensembles des 51 prédicteurs et la régression lasso sur sous ensembles des 50 prédicteurs. On choisira le meilleur après l'avoir testé sur le site
+
+```{r}
+model.fit1=lm(reg.data$y~.,data=reg.data[,reg.subsets$which[51, 2:101]])
+cv.out<-cv.glmnet(as.matrix(reg.data[,reg.subsets$which[50, 2:101]]),reg.data$y,alpha=1)
+model.fit2<-glmnet(as.matrix(reg.data[,reg.subsets$which[50,2:101]]),reg.data$y,lambda=cv.out$lambda.min,alpha=1)
+
+```
+
+## 1.3. D'autres méthodes
+
+Nous avons également essayé d'autres modèles mais obtenu la MSE grande.
+
+### 1.3.1. KNN
+```{r}
+library('FNN')
+n=nrow(reg.data)
+train_indices=sample(1:n,round(4*n/5))
+data_train=reg.data[train_indices,]
+data_test=reg.data[-train_indices,]
+x.app=scale(data_train[,1:100])
+y.app=data_train[,101]
+x.tst=scale(data_test[,1:100])
+y.tst=data_test[,101]
+MSE=rep(0,15)
+for(k in 1:15){
+  reg=knn.reg(train=x.app,test=x.tst,y=y.app,k=k)
+  MSE[k]=mean((y.tst-reg$pred)^2)
+}
+km=which.min(MSE)
+reg=knn.reg(train=x.app,test=x.tst,y=y.app,k=km)
+knn.mse=mean((y.tst-reg$pred)^2)
+print(knn.mse)
+
+```
+### 1.3.2. Principal component regression
+```{r}
+library(pls)
+pcr.fit=pcr(y~.,data=data_train,scale=TRUE,validation="CV")
+pcr.pred=predict(pcr.fit,newdata = data_test)
+pcr.mse=mean((y.tst-pcr.pred)^2)
+print(pcr.mse)
+```
+### 1.3.3. Regression tree
+
+```{r}
+library(rpart)
+fit=rpart(y~.,data=data_train,method="anova")
+tree.pred=predict(fit,newdata = data_test)
+tree.mse=mean((y.tst-tree.pred)^2)
+print(tree.mse)
+```
+### 1.3.4. Random Forest
+```{r}
+library(randomForest)
+fit=randomForest(y~.,data=data_train,importance=TRUE)
+f.pred=predict(fit,data_test)
+mse=mean((y.tst-f.pred)^2)
+print(mse)
+```
+
+
+
+# 2. Classification
+
+## 2.1. Analyse exploratoire
+
+Le dataset contient 50 prédicteurs (X1, X2, ..., X50), et une colonne y pouvant prendre les valeurs 1,2 ou 3. Le fichier contient 500 observations.
+
+```{r}
+class <- read.table("TP5_a23_clas_app.txt")
+trainIndex <- createDataPartition(class$y, p = 0.7, list = FALSE)
+data_train <- class[trainIndex, ]
+data_test <- class[-trainIndex, ]
+hist(class$y,xlab="valeurs de y", main = "Répartition des valeurs de Y")
+```
+Pour rechercher le modèle le plus efficace, on se décide à effectuer, pour chaque modèle candidat, un certain nombre d'essais en validation croisée (k=10), en retenant pour chaque candidat la précision moyenne sur les essais (en termes d'erreur de classifciation). On retiendra le meilleur modèle.
+
+Les candidats sont  l'analyse discriminante quadratique,l'analyse discriminante linéaire, la classification bayésienne naïve ainsi que la régression logistique.
+On présente ci-dessous les résultats avec K=10
+```{r}
+k <- 10
+n=nrow(class)
+class$y <- as.factor(class$y) 
+# cross validation
+K <- 10
+fold <- sample(K, n, replace = TRUE)
+err=rep(0, K)
+err_lda=rep(0, K)
+err_qda=rep(0, K)
+err_NB=rep(0, K)
+err_knn=rep(0, K)
+for (i in 1:K) {
+  test_indices <- which(fold == i)
+  train_indices <- which(fold != i)
+  data_train <- class[train_indices, ]
+  data_test <- class[test_indices, ]
+  model <- multinom(y ~ ., data = data_train)
+  predictions <- predict(model, newdata = data_test, type = "class")
+  correct_preds <- sum(predictions == data_test$y)
+  accuracy <- correct_preds / nrow(data_test)
+  error <- 1 - accuracy
+  err[i] <- error
+}
+print("Results :")
+print(mean(err))
+print(err)
+#####lda########"
+for (i in 1:K) {
+  test_indices <- which(fold == i)
+  train_indices <- which(fold != i)
+  data_train <- class[train_indices, ]
+  data_test <- class[test_indices, ]
+  model <- lda(y ~ ., data = data_train)
+  predictions <- predict(model, newdata = data_test, type = "class")
+  correct_preds <- sum(predictions$class == data_test$y)
+  accuracy <- correct_preds / nrow(data_test)
+  error <- 1 - accuracy
+ err_lda[i] <- error
+}
+print("Results :")
+print(mean(err_lda))
+for (i in 1:K) {
+  test_indices <- which(fold == i)
+  train_indices <- which(fold != i)
+  
+  data_train <- class[train_indices, ]
+  data_test <- class[test_indices, ]
+  model <- qda(y ~ ., data = data_train)
+  
+  predictions <- predict(model, newdata = data_test, type = "class")
+  
+  
+  correct_preds <- sum(predictions$class == data_test$y)
+  accuracy <- correct_preds / nrow(data_test)
+  error <- 1 - accuracy
+  err_qda[i] <- error
+}
+print("Results :")
+print(mean(err_qda))
+for (i in 1:K) {
+  test_indices <- which(fold == i)
+  train_indices <- which(fold != i)
+  
+  data_train <- class[train_indices, ]
+  data_test <- class[test_indices, ]
+  model <- naiveBayes(y ~ ., data = data_train)
+  
+  predictions <- predict(model, newdata = data_test, type = "class")
+  
+  
+  correct_preds <- sum(predictions == data_test$y)
+  accuracy <- correct_preds / nrow(data_test)
+  error <- 1 - accuracy
+  err_NB[i] <- error
+}
+print("Results :")
+print(mean(err_NB))
+for (i in 1:K) {
+  data_train_fold <- data_train[fold != i, ]
+  data_test_fold <- data_train[fold == i, ]
+  data_train_fold <- na.omit(data_train_fold)
+  data_test_fold <- na.omit(data_test_fold)
+  predicted_knn <- knn(train = data_train_fold[, 1:50], test = data_test_fold[, 1:50], cl = data_train_fold$y, k = k)
+  confusion_matrix <- table(Prédit = predicted_knn, Réel = data_test_fold$y)
+  error_rate <- 1 - sum(predicted_knn == data_test_fold$y) / length(predicted_knn)
+  err_knn[i] <- error_rate
+}
+mean_error_rate <- mean(err_knn)
+cat("Taux d'erreur moyen:", mean_error_rate, "\n")
+print(err_knn)
+boxplot(err,err_lda,err_qda,err_NB,err_knn,names = c("Log_reg","LDA","QDA","Naïve Bayes","KNN"),xlab= "modèles",ylab="taux d'erreur",main="Taux d'erreur sur chaque modèle avec utilisation de la Kcross validation")
+```
+La lecture des diagrammes en boite nous permet de constater que le classifieur analyse discriminante quadratique naïf donne les meilleurs résultats, avec une bonne stabilité. Cependant le classifieur Naïve Bayesien semble avoir également de bons résultats.
+
+Nous avons également exploré d'autres modèles que nous avons récemment découverts en cours, même si nous ne les avons pas encore étudiés en détail lors des travaux dirigés.
+Dans un premier temps nous avons étudié la méthode du Tree growning.
+Nous avons ensuite élagué cet arbre avec deux différentes valeurs de CP afin d'obtenir des arbres élagués différents et observer le résultats sur la matrice de Confusion
+
+```{r}
+fit <- rpart(y ~ ., data = data_train, method = "class")
+rpart.plot(fit, box.palette="RdBu", shadow.col="gray",fallen.leaves=FALSE,main="arbre avant élagage")
+plotcp(fit)
+pruned_tree0.051<-prune(fit,cp=0.051)
+rpart.plot(pruned_tree0.051, box.palette="RdBu", shadow.col="gray",fallen.leaves=FALSE,main="arbre élagué cp=0.051")
+pruned_tree0.027<-prune(fit,cp=0.027)
+rpart.plot(pruned_tree0.027, box.palette="RdBu", shadow.col="gray",fallen.leaves=FALSE,main="arbre élagué cp=0.027")
+#cp = 0.051
+tree.pred <- predict(pruned_tree0.051, newdata = data_test, type = "class")
+confusion_matrix_ptree <- table(Prédiction = tree.pred, Vraie_Classe = data_test$y)
+print(confusion_matrix_ptree)
+error_rate_ptree <- 1 - sum(diag(confusion_matrix_ptree)) / sum(confusion_matrix_ptree)
+cat("Taux d'erreur avec cp=0.051 :", error_rate_ptree, "\n")
+#cp = 0.027
+tree.pred <- predict(pruned_tree0.027, newdata = data_test, type = "class")
+confusion_matrix_ptree <- table(Prédiction = tree.pred, Vraie_Classe = data_test$y)
+print(confusion_matrix_ptree)
+error_rate_ptree <- 1 - sum(diag(confusion_matrix_ptree)) / sum(confusion_matrix_ptree)
+cat("Taux d'erreur avec cp=0.027:", error_rate_ptree, "\n")
+```
+nous observons que les erreurs sont assez élevées et sachant que nous n'avons pas encore étudié en détails ces modèles en TD, nous n'allons pas retenir ces modèles néanmoins il est important de noter que ce genre de modèle est assez visuel et assez facilement interprétable, même pour quelqu'un ayant peu de notions dans ce domaine.
+
+Dans la même démarche, nous avons essayé les randoms forest et le bagging sans les retenir.
+
+```{r}
+######random forest#####
+p <- ncol(class) - 1
+fit2=randomForest(as.factor(y)~.,data=data_train,importance=TRUE, mtry = 3)
+f.pred=predict(fit2,data_test,type = "response")
+y.test <- data_test$y
+
+table(y.test,f.pred)
+1-mean(y.test==f.pred)
+varImpPlot(fit2, main = "random Forest")
+
+######Baggging######
+fit3=randomForest(as.factor(y)~.,data=data_train, mtry = p)
+f.pred2=predict(fit3,data_test,type = "response")
+y.test <- data_test$y
+
+table(y.test,f.pred2)
+1-mean(y.test==f.pred2)
+varImpPlot(fit3,main = "Bagging")
+
+##############subset select
+models <- regsubsets(y~., data = class, nvmax = 50, method = "forward")
+res.sum <- summary(models)
+plot(models,scale="r2",main="Forward stepwise selection")
+models <- regsubsets(y~., data = class, nvmax = 50,  method = "backward")
+res.sum <- summary(models)
+plot(models,scale="r2",main="Backward stepwise selection")
+```
+
